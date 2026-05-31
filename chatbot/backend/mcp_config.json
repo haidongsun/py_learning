@@ -1,0 +1,9 @@
+[
+    {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "enabled": false,
+        "description": "文件系统访问"
+    }
+]

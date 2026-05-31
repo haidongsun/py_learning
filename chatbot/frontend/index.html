@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ChatBot - AI 助手</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <style>
 :root {
@@ -18,6 +19,8 @@
   --border: #e5e7eb;
   --user-bubble: #e8e8ff;
   --user-text: #3730a3;
+  --thinking-bg: #fffbeb;
+  --thinking-border: #fcd34d;
   --danger: #ef4444;
   --danger-hover: #dc2626;
   --radius: 8px;
@@ -187,11 +190,16 @@ body {
 .welcome h2 { font-size: 22px; margin-bottom: 8px; color: var(--text); }
 .welcome p { font-size: 14px; max-width: 420px; line-height: 1.6; }
 
+/* ── Messages ────────────────────────────── */
+
 .msg {
   display: flex;
   gap: 12px;
   margin-bottom: 24px;
   animation: fadeIn .2s ease;
+}
+.msg.user {
+  flex-direction: row-reverse;
 }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -216,11 +224,12 @@ body {
 }
 
 .msg.user .msg-content {
+  flex: 0 1 auto;
   background: var(--user-bubble);
   color: var(--user-text);
   padding: 12px 16px;
   border-radius: var(--radius-lg);
-  max-width: 80%;
+  max-width: 70%;
 }
 
 .msg.ai .msg-content { color: var(--text); }
@@ -281,6 +290,185 @@ body {
 .btn-copy:hover { background: rgba(255,255,255,.2); color: #fff; }
 .btn-copy.copied { background: var(--accent); border-color: var(--accent); }
 
+/* ── Thinking Block ──────────────────────── */
+
+.thinking-block {
+  margin-bottom: 12px;
+  border: 1px solid var(--thinking-border);
+  border-radius: var(--radius);
+  background: var(--thinking-bg);
+  overflow: hidden;
+  animation: fadeIn .2s ease;
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #92400e;
+  cursor: pointer;
+  user-select: none;
+  transition: background .12s;
+}
+.thinking-header:hover { background: rgba(252,211,77,.2); }
+
+.thinking-header .arrow {
+  font-size: 10px;
+  transition: transform .2s;
+}
+.thinking-header .arrow.collapsed { transform: rotate(-90deg); }
+
+.thinking-content {
+  padding: 0 14px 12px;
+  font-size: 13px;
+  color: #78716c;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.thinking-content.collapsed { display: none; }
+
+.thinking-streaming .thinking-content {
+  border-left: 3px solid var(--thinking-border);
+  margin-left: 11px;
+  padding-left: 12px;
+}
+
+/* ── Tool Block ──────────────────────────── */
+
+.tool-block {
+  margin-bottom: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius);
+  background: #eff6ff;
+  overflow: hidden;
+  animation: fadeIn .2s ease;
+  font-size: 13px;
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-weight: 500;
+  color: #1e40af;
+  background: rgba(191,219,254,.3);
+  cursor: pointer;
+  user-select: none;
+  transition: background .12s;
+}
+.tool-header:hover { background: rgba(191,219,254,.5); }
+.tool-header .arrow { font-size: 10px; margin-left: auto; transition: transform .2s; }
+.tool-header .arrow.collapsed { transform: rotate(-90deg); }
+
+.tool-body {
+  padding: 8px 12px;
+  color: #374151;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+.tool-body.collapsed { display: none; }
+
+.tool-start .tool-body { color: #6b7280; }
+
+/* ── Search Results ──────────────────────── */
+
+.search-results { padding: 0; }
+
+.search-result {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(191,219,254,.4);
+  line-height: 1.5;
+}
+.search-result:last-child { border-bottom: none; }
+
+.search-result-title {
+  font-weight: 600;
+  color: #1e40af;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+.search-result-title a {
+  color: inherit;
+  text-decoration: none;
+}
+.search-result-title a:hover { text-decoration: underline; }
+
+.search-result-url {
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-result-snippet {
+  font-size: 12px;
+  color: #374151;
+  line-height: 1.6;
+}
+
+.search-results.collapsed { display: none; }
+
+/* ── Tool Loading Spinner ────────────────── */
+
+.tool-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid #bfdbfe;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+/* ── Skill Select ────────────────────────── */
+
+.skill-select {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  outline: none;
+  cursor: pointer;
+}
+.skill-select:focus { border-color: var(--accent); }
+
 /* ── Input Area ──────────────────────────── */
 
 .input-area {
@@ -299,6 +487,12 @@ body {
   gap: 8px;
 }
 
+.input-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .model-select {
   padding: 4px 10px;
   border: 1px solid var(--border);
@@ -308,10 +502,30 @@ body {
   background: var(--bg);
   outline: none;
   cursor: pointer;
-  width: fit-content;
 }
 .model-select:focus { border-color: var(--accent); }
 .model-select option:disabled { color: var(--text-secondary); }
+
+.btn-thinking {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--text-secondary);
+  transition: all .15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-thinking:hover { border-color: var(--thinking-border); color: #92400e; }
+.btn-thinking.active {
+  background: var(--thinking-bg);
+  border-color: var(--thinking-border);
+  color: #92400e;
+}
 
 .input-box {
   display: flex;
@@ -410,7 +624,7 @@ body {
   .chat-header { padding: 12px 16px; }
   .messages { padding: 16px; }
   .input-area { padding: 12px 16px; }
-  .msg.user .msg-content { max-width: 90%; }
+  .msg.user .msg-content { max-width: 85%; }
 }
 </style>
 </head>
@@ -422,7 +636,7 @@ body {
     <button class="btn-new" onclick="createChat()">+ 新对话</button>
   </div>
   <div class="conv-list" id="convList"></div>
-  <div class="sidebar-footer">API: <span id="apiStatus">mock</span></div>
+  <div class="sidebar-footer">API: <span id="apiStatus">mock</span> | MCP: <span id="mcpStatus">--</span></div>
 </aside>
 
 <main class="chat-area">
@@ -434,12 +648,16 @@ body {
     <div class="welcome" id="welcome">
       <div class="welcome-icon">🤖</div>
       <h2>欢迎使用 ChatBot</h2>
-      <p>支持 DeepSeek V4 Pro / Flash 和千问系列模型。设置对应的 API Key 环境变量后选择模型即可开始对话。</p>
+      <p>支持 DeepSeek V4 Pro / Flash 和千问系列模型。开启「深度思考」模式可查看模型推理过程。</p>
     </div>
   </div>
   <div class="input-area">
     <div class="input-row">
-      <select class="model-select" id="modelSelect" onchange="onModelChange()"></select>
+      <div class="input-controls">
+        <select class="model-select" id="modelSelect" onchange="onModelChange()"></select>
+        <select class="skill-select" id="skillSelect" onchange="onSkillChange()"></select>
+        <button class="btn-thinking" id="btnThinking" onclick="toggleThinking()">🧠 深度思考</button>
+      </div>
       <div class="input-box">
         <textarea id="inputBox" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)" rows="1"></textarea>
         <button class="btn-send" id="btnSend" onclick="send()" disabled>➤</button>
@@ -458,6 +676,9 @@ let currentId = null;
 let isStreaming = false;
 let models = [];
 let currentModel = '';
+let skills = [];
+let currentSkill = 'general';
+let thinkingEnabled = false;
 
 // ── Marked config ──
 marked.setOptions({ breaks: true, gfm: true });
@@ -485,9 +706,62 @@ function toast(msg) {
   setTimeout(() => t.remove(), 2500);
 }
 
+function hideWelcome() {
+  const w = el('welcome');
+  if (w) w.style.display = 'none';
+}
+
 function scrollBottom() {
   const m = el('messages');
   m.scrollTop = m.scrollHeight;
+}
+
+// ── Thinking toggle ──
+function toggleThinking() {
+  thinkingEnabled = !thinkingEnabled;
+  const btn = el('btnThinking');
+  if (thinkingEnabled) {
+    btn.classList.add('active');
+    btn.innerHTML = '🧠 深度思考 ✓';
+  } else {
+    btn.classList.remove('active');
+    btn.innerHTML = '🧠 深度思考';
+  }
+}
+
+// ── Thinking block ──
+function formatThinking(text) {
+  if (!text) return text;
+  if (!text.includes('\n')) {
+    return text.replace(/([。！？])\s*/g, '$1\n\n');
+  }
+  return text;
+}
+
+function createThinkingBlock(parentEl) {
+  const block = document.createElement('div');
+  block.className = 'thinking-block thinking-streaming';
+  block.innerHTML = `
+    <div class="thinking-header" onclick="event.stopPropagation();this.parentElement.querySelector('.thinking-content').classList.toggle('collapsed');this.querySelector('.arrow').classList.toggle('collapsed')">
+      <span>🧠 深度思考中…</span>
+      <span class="arrow">▼</span>
+    </div>
+    <div class="thinking-content"></div>
+  `;
+  parentEl.appendChild(block);
+  return block;
+}
+
+function thinkingBlockHTML(content) {
+  if (!content) return '';
+  return `
+    <div class="thinking-block">
+      <div class="thinking-header" onclick="var c=this.nextElementSibling;var a=this.querySelector('.arrow');c.classList.toggle('collapsed');a.classList.toggle('collapsed')">
+        <span>🧠 思考过程</span>
+        <span class="arrow collapsed">▼</span>
+      </div>
+      <div class="thinking-content collapsed">${marked.parse(formatThinking(content))}</div>
+    </div>`;
 }
 
 // ── Models ──
@@ -496,7 +770,9 @@ async function loadModels() {
     const res = await fetch('/api/models');
     const data = await res.json();
     models = data.models;
-    currentModel = data.default;
+    const def = models.find(m => m.id === data.default && m.available);
+    const first = models.find(m => m.available);
+    currentModel = def ? def.id : (first ? first.id : data.default);
     renderModelSelect();
     updateModelBadge();
     updateApiStatus();
@@ -559,7 +835,50 @@ function updateApiStatus() {
     st.style.color = '#10b981';
   } else {
     st.textContent = 'mock';
-    st.style.color = var(--text-secondary);
+    st.style.color = '#6b7280';
+  }
+}
+
+// ── Skills ──
+async function loadSkills() {
+  try {
+    const res = await fetch('/api/skills');
+    const data = await res.json();
+    skills = data.skills;
+    currentSkill = data.default || 'general';
+    renderSkillSelect();
+  } catch(e) {
+    console.error('Load skills failed:', e);
+  }
+}
+
+function renderSkillSelect() {
+  const sel = el('skillSelect');
+  sel.innerHTML = skills.map(s => {
+    const selected = s.id === currentSkill ? ' selected' : '';
+    return `<option value="${s.id}"${selected}>${s.icon} ${escapeHtml(s.name)}</option>`;
+  }).join('');
+}
+
+function onSkillChange() {
+  currentSkill = el('skillSelect').value;
+}
+
+// ── MCP Status ──
+async function loadMCPStatus() {
+  try {
+    const res = await fetch('/api/mcp/status');
+    const data = await res.json();
+    const st = el('mcpStatus');
+    if (data.tool_count > 0) {
+      st.textContent = `${data.tool_count} tools`;
+      st.style.color = '#10b981';
+    } else {
+      st.textContent = '--';
+      st.style.color = '#6b7280';
+    }
+  } catch(e) {
+    el('mcpStatus').textContent = '--';
   }
 }
 
@@ -613,7 +932,7 @@ async function selectConversation(id) {
     const conv = await res.json();
     renderMessages(conv.messages);
     el('chatTitle').textContent = conv.title;
-    el('welcome').style.display = 'none';
+    hideWelcome();
     el('btnSend').disabled = false;
     el('inputBox').focus();
   } catch(e) {
@@ -648,7 +967,7 @@ async function deleteChat(id) {
         el('messages').innerHTML = `<div class="welcome" id="welcome">
           <div class="welcome-icon">🤖</div>
           <h2>欢迎使用 ChatBot</h2>
-          <p>支持 DeepSeek V4 Pro / Flash 和千问系列模型。</p>
+          <p>支持 DeepSeek V4 Pro / Flash 和千问系列模型。开启「深度思考」模式可查看模型推理过程。</p>
         </div>`;
         el('chatTitle').textContent = 'ChatBot';
         el('btnSend').disabled = true;
@@ -681,16 +1000,27 @@ async function renamePrompt(id) {
 // ── Messages rendering ──
 function renderMessages(msgs) {
   const container = el('messages');
-  el('welcome').style.display = 'none';
-  container.innerHTML = msgs.map(m => msgHTML(m.role, m.content)).join('');
+  hideWelcome();
+  container.innerHTML = msgs.map(m => msgHTML(m.role, m.content, m.thinking, m.tools)).join('');
   container.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
   scrollBottom();
 }
 
-function msgHTML(role, content) {
+function msgHTML(role, content, thinking, tools) {
   const avatar = role === 'user' ? '👤' : '🤖';
   const cls = role === 'user' ? 'user' : 'ai';
-  const body = role === 'ai' ? marked.parse(content) : escapeHtml(content);
+  let body = '';
+  if (role === 'ai') {
+    if (tools && tools.length > 0) {
+      for (const t of tools) {
+        body += toolBlockHTML(t.name, t.result || t.args || '');
+      }
+    }
+    if (thinking) body += thinkingBlockHTML(thinking);
+    body += marked.parse(content);
+  } else {
+    body = escapeHtml(content);
+  }
   return `
     <div class="msg ${cls}">
       <div class="msg-avatar ${cls}">${avatar}</div>
@@ -698,18 +1028,41 @@ function msgHTML(role, content) {
     </div>`;
 }
 
-function createAIMessagePlaceholder() {
-  const container = el('messages');
-  el('welcome').style.display = 'none';
-  const div = document.createElement('div');
-  div.className = 'msg ai';
-  div.innerHTML = `
-    <div class="msg-avatar ai">🤖</div>
-    <div class="msg-content"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
-  `;
-  container.appendChild(div);
-  scrollBottom();
-  return div.querySelector('.msg-content');
+function toolBlockHTML(name, detail) {
+  if (name === 'web_search' && detail) {
+    try {
+      const data = typeof detail === 'string' ? JSON.parse(detail) : detail;
+      const results = data.results || [];
+      if (results.length > 0) {
+        const cards = results.map(r => `
+          <div class="search-result">
+            <div class="search-result-title"><a href="${escapeHtml(r.url)}" target="_blank">${escapeHtml(r.title)}</a></div>
+            <div class="search-result-url">${escapeHtml(r.url)}</div>
+            <div class="search-result-snippet">${escapeHtml(r.snippet)}</div>
+          </div>
+        `).join('');
+        return `
+          <div class="tool-block">
+            <div class="tool-header" onclick="var c=this.nextElementSibling;var a=this.querySelector('.arrow');c.classList.toggle('collapsed');a.classList.toggle('collapsed')">
+              <span>🔍 搜索结果 (${results.length} 条)</span>
+              <span class="arrow collapsed">▼</span>
+            </div>
+            <div class="search-results collapsed">${cards}</div>
+          </div>`;
+      }
+    } catch(e) {}
+  }
+  let body = '';
+  try { body = (typeof detail === 'string') ? JSON.stringify(JSON.parse(detail), null, 2) : JSON.stringify(detail, null, 2); }
+  catch(e) { body = String(detail); }
+  return `
+    <div class="tool-block">
+      <div class="tool-header" onclick="var c=this.nextElementSibling;var a=this.querySelector('.arrow');c.classList.toggle('collapsed');a.classList.toggle('collapsed')">
+        <span>🔧 ${escapeHtml(name)}</span>
+        <span class="arrow collapsed">▼</span>
+      </div>
+      <div class="tool-body collapsed">${escapeHtml(body)}</div>
+    </div>`;
 }
 
 // ── Send message ──
@@ -723,9 +1076,10 @@ async function send() {
   input.style.height = 'auto';
   el('btnSend').disabled = true;
   isStreaming = true;
+  const thinking = thinkingEnabled;
 
   const container = el('messages');
-  el('welcome').style.display = 'none';
+  hideWelcome();
 
   const userDiv = document.createElement('div');
   userDiv.className = 'msg user';
@@ -733,14 +1087,23 @@ async function send() {
   container.appendChild(userDiv);
   scrollBottom();
 
-  const aiContent = createAIMessagePlaceholder();
-  let fullText = '';
+  const aiMsgDiv = document.createElement('div');
+  aiMsgDiv.className = 'msg ai';
+  aiMsgDiv.innerHTML = `<div class="msg-avatar ai">🤖</div><div class="msg-content"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>`;
+  container.appendChild(aiMsgDiv);
+  const aiContent = aiMsgDiv.querySelector('.msg-content');
+
+  let thinkingBlock = null;
+  let answerEl = null;
+  let thinkingBuf = '';
+  let answerBuf = '';
+  let firstEvent = true;
 
   try {
     const res = await fetch(`/api/conversations/${currentId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model: currentModel }),
+      body: JSON.stringify({ content, model: currentModel, thinking, skill: currentSkill }),
     });
 
     if (!res.ok) {
@@ -763,27 +1126,140 @@ async function send() {
         if (!line.startsWith('data: ')) continue;
         try {
           const data = JSON.parse(line.slice(6));
-          if (data.type === 'token') {
-            fullText += data.content;
-            aiContent.innerHTML = marked.parse(fullText);
-            aiContent.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
-            scrollBottom();
-          } else if (data.type === 'done') {
-            scrollBottom();
+          // Clear loading dots on first real event
+          if (firstEvent && data.type !== 'done') {
+            firstEvent = false;
+            aiContent.innerHTML = '';
+          }
+          switch (data.type) {
+            case 'thinking_start':
+              thinkingBlock = createThinkingBlock(aiContent);
+              break;
+            case 'thinking':
+              thinkingBuf += data.content;
+              if (thinkingBlock) {
+                const tc = thinkingBlock.querySelector('.thinking-content');
+                tc.innerHTML = marked.parse(formatThinking(thinkingBuf));
+                scrollBottom();
+              }
+              break;
+            case 'thinking_done':
+              if (thinkingBlock) {
+                thinkingBlock.querySelector('.thinking-header span').textContent = '🧠 思考完成';
+                thinkingBlock.classList.remove('thinking-streaming');
+              }
+              answerEl = document.createElement('div');
+              answerEl.className = 'answer-body';
+              answerEl.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+              aiContent.appendChild(answerEl);
+              scrollBottom();
+              break;
+            case 'tool_start':
+              try {
+                const ts = JSON.parse(data.content);
+                if (ts.name === 'web_search') {
+                  const args = JSON.parse(ts.args || '{}');
+                  const tb = document.createElement('div');
+                  tb.className = 'tool-block tool-start';
+                  tb.innerHTML = `
+                    <div class="tool-header">
+                      <span>🔍 搜索中: ${escapeHtml(args.query || '')}</span>
+                      <span class="spinner" style="margin-left:auto"></span>
+                    </div>
+                  `;
+                  tb._toolName = ts.name;
+                  aiContent.appendChild(tb);
+                } else {
+                  const tb = document.createElement('div');
+                  tb.className = 'tool-block tool-start';
+                  tb.innerHTML = `
+                    <div class="tool-header">
+                      <span>🔧 调用工具: ${escapeHtml(ts.name)}</span>
+                      <span class="spinner" style="margin-left:auto"></span>
+                    </div>
+                    <div class="tool-body">${escapeHtml(ts.args || '')}</div>
+                  `;
+                  tb._toolName = ts.name;
+                  aiContent.appendChild(tb);
+                }
+                scrollBottom();
+              } catch(e) {}
+              break;
+            case 'tool_result':
+              try {
+                const tr = JSON.parse(data.content);
+                const existing = aiContent.querySelectorAll('.tool-start');
+                if (existing.length > 0) {
+                  const last = existing[existing.length - 1];
+                  last.classList.remove('tool-start');
+                  if (tr.name === 'web_search') {
+                    const result = JSON.parse(tr.result);
+                    const results = result.results || [];
+                    let cards = '';
+                    if (results.length > 0) {
+                      cards = results.map(r => `
+                        <div class="search-result">
+                          <div class="search-result-title"><a href="${escapeHtml(r.url)}" target="_blank">${escapeHtml(r.title)}</a></div>
+                          <div class="search-result-url">${escapeHtml(r.url)}</div>
+                          <div class="search-result-snippet">${escapeHtml(r.snippet)}</div>
+                        </div>
+                      `).join('');
+                    } else {
+                      cards = '<div style="padding:8px 12px;color:#6b7280">未找到相关结果</div>';
+                    }
+                    last.innerHTML = `
+                      <div class="tool-header" onclick="var c=this.nextElementSibling;var a=this.querySelector('.arrow');c.classList.toggle('collapsed');a.classList.toggle('collapsed')">
+                        <span>🔍 搜索结果 (${results.length} 条)</span>
+                        <span class="arrow collapsed">▼</span>
+                      </div>
+                      <div class="search-results collapsed">${cards}</div>
+                    `;
+                  } else {
+                    const hdr = last.querySelector('.tool-header span');
+                    if (hdr) hdr.textContent = '🔧 ' + escapeHtml(tr.name);
+                    const body = last.querySelector('.tool-body');
+                    if (body) {
+                      try { body.textContent = JSON.stringify(JSON.parse(tr.result), null, 2); }
+                      catch(e) { body.textContent = tr.result; }
+                    }
+                  }
+                }
+                scrollBottom();
+              } catch(e) {}
+              break;
+            case 'tool_done':
+              break;
+            case 'token':
+              answerBuf += data.content;
+              if (!answerEl) {
+                answerEl = document.createElement('div');
+                answerEl.className = 'answer-body';
+                aiContent.appendChild(answerEl);
+              }
+              answerEl.innerHTML = marked.parse(answerBuf);
+              answerEl.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+              scrollBottom();
+              break;
+            case 'done':
+              scrollBottom();
+              break;
           }
         } catch(e) {}
       }
     }
   } catch(e) {
-    aiContent.innerHTML = marked.parse(fullText + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`);
+    let html = '';
+    if (thinkingBlock) html += thinkingBlock.outerHTML;
+    html += marked.parse(answerBuf + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`);
+    aiContent.innerHTML = html;
   }
 
   isStreaming = false;
   el('btnSend').disabled = false;
   el('inputBox').focus();
 
-  const res = await api('/api/conversations');
-  conversations = await res.json();
+  const resp = await api('/api/conversations');
+  conversations = await resp.json();
   renderConvList();
   if (currentId) {
     const conv = conversations.find(c => c.id === currentId);
@@ -819,6 +1295,8 @@ el('inputBox').addEventListener('input', function() {
 
 // ── Init ──
 loadModels();
+loadSkills();
+loadMCPStatus();
 loadConversations();
 </script>
 </body>
