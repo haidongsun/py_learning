@@ -527,6 +527,27 @@ body {
   color: #92400e;
 }
 
+.btn-websearch {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--text-secondary);
+  transition: all .15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-websearch:hover { border-color: #93c5fd; color: #1e40af; }
+.btn-websearch.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1e40af;
+}
+
 .input-box {
   display: flex;
   gap: 10px;
@@ -565,6 +586,23 @@ body {
 }
 .btn-send:hover { background: var(--accent-hover); }
 .btn-send:disabled { background: #d1d5db; cursor: not-allowed; }
+
+.btn-stop {
+  width: 44px; height: 44px;
+  border: none;
+  background: var(--danger);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 18px;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  transition: all .15s;
+  flex-shrink: 0;
+}
+.btn-stop:hover { background: var(--danger-hover); }
+.btn-stop.visible { display: flex; }
 
 /* ── Loading ─────────────────────────────── */
 
@@ -656,11 +694,13 @@ body {
       <div class="input-controls">
         <select class="model-select" id="modelSelect" onchange="onModelChange()"></select>
         <select class="skill-select" id="skillSelect" onchange="onSkillChange()"></select>
+        <button class="btn-websearch active" id="btnWebSearch" onclick="toggleWebSearch()">🌐 联网搜索</button>
         <button class="btn-thinking" id="btnThinking" onclick="toggleThinking()">🧠 深度思考</button>
       </div>
       <div class="input-box">
         <textarea id="inputBox" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)" rows="1"></textarea>
         <button class="btn-send" id="btnSend" onclick="send()" disabled>➤</button>
+        <button class="btn-stop" id="btnStop" onclick="stopGeneration()">⏹</button>
       </div>
     </div>
   </div>
@@ -679,21 +719,34 @@ let currentModel = '';
 let skills = [];
 let currentSkill = 'general';
 let thinkingEnabled = false;
+let webSearchEnabled = true;
+let abortController = null;
 
 // ── Marked config ──
-marked.setOptions({ breaks: true, gfm: true });
-
 const renderer = new marked.Renderer();
 renderer.code = function({ text, lang }) {
   const escaped = escapeHtml(text);
   const langClass = lang ? ` class="language-${lang}"` : '';
   return `<div class="code-block-wrapper"><pre><code${langClass}>${escaped}</code></pre><button class="btn-copy" onclick="copyCode(this)">复制</button></div>`;
 };
-marked.use({ renderer });
+marked.use({ breaks: true, gfm: true, renderer });
 
 // ── Helpers ──
+function fixMarkdown(text) {
+  return text
+    .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+    .replace(/^(\s*)([-*+])([^\s])/gm, '$1$2 $3')
+    .replace(/^(>)([^\s>])/gm, '$1 $2');
+}
+
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function stripDSML(text) {
+  return text
+    .replace(/<\uFF5Ctool_calls>.*?<\/\uFF5Ctool_calls>/gs, '')
+    .replace(/<\/?\uFF5C[^>]*>/g, '');
 }
 
 function el(id) { return document.getElementById(id); }
@@ -729,6 +782,27 @@ function toggleThinking() {
   }
 }
 
+// ── Web search toggle ──
+function toggleWebSearch() {
+  webSearchEnabled = !webSearchEnabled;
+  const btn = el('btnWebSearch');
+  if (webSearchEnabled) {
+    btn.classList.add('active');
+    btn.innerHTML = '🌐 联网搜索 ✓';
+  } else {
+    btn.classList.remove('active');
+    btn.innerHTML = '🌐 联网搜索';
+  }
+}
+
+// ── Stop generation ──
+function stopGeneration() {
+  if (abortController) {
+    abortController.abort();
+    abortController = null;
+  }
+}
+
 // ── Thinking block ──
 function formatThinking(text) {
   if (!text) return text;
@@ -760,7 +834,7 @@ function thinkingBlockHTML(content) {
         <span>🧠 思考过程</span>
         <span class="arrow collapsed">▼</span>
       </div>
-      <div class="thinking-content collapsed">${marked.parse(formatThinking(content))}</div>
+      <div class="thinking-content collapsed">${marked.parse(fixMarkdown(formatThinking(content)))}</div>
     </div>`;
 }
 
@@ -1017,7 +1091,7 @@ function msgHTML(role, content, thinking, tools) {
       }
     }
     if (thinking) body += thinkingBlockHTML(thinking);
-    body += marked.parse(content);
+    body += marked.parse(fixMarkdown(content));
   } else {
     body = escapeHtml(content);
   }
@@ -1074,8 +1148,10 @@ async function send() {
 
   input.value = '';
   input.style.height = 'auto';
-  el('btnSend').disabled = true;
+  el('btnSend').style.display = 'none';
+  el('btnStop').classList.add('visible');
   isStreaming = true;
+  abortController = new AbortController();
   const thinking = thinkingEnabled;
 
   const container = el('messages');
@@ -1103,7 +1179,8 @@ async function send() {
     const res = await fetch(`/api/conversations/${currentId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model: currentModel, thinking, skill: currentSkill }),
+      body: JSON.stringify({ content, model: currentModel, thinking, skill: currentSkill, web_search: webSearchEnabled }),
+      signal: abortController.signal,
     });
 
     if (!res.ok) {
@@ -1139,7 +1216,7 @@ async function send() {
               thinkingBuf += data.content;
               if (thinkingBlock) {
                 const tc = thinkingBlock.querySelector('.thinking-content');
-                tc.innerHTML = marked.parse(formatThinking(thinkingBuf));
+                tc.innerHTML = marked.parse(fixMarkdown(formatThinking(thinkingBuf)));
                 scrollBottom();
               }
               break;
@@ -1236,7 +1313,7 @@ async function send() {
                 answerEl.className = 'answer-body';
                 aiContent.appendChild(answerEl);
               }
-              answerEl.innerHTML = marked.parse(answerBuf);
+              answerEl.innerHTML = marked.parse(fixMarkdown(answerBuf));
               answerEl.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
               scrollBottom();
               break;
@@ -1248,14 +1325,29 @@ async function send() {
       }
     }
   } catch(e) {
-    let html = '';
-    if (thinkingBlock) html += thinkingBlock.outerHTML;
-    html += marked.parse(answerBuf + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`);
-    aiContent.innerHTML = html;
+    if (e.name === 'AbortError') {
+      answerBuf += '\n\n> ⏹ 已中断';
+      if (answerEl) {
+        answerEl.innerHTML = marked.parse(fixMarkdown(answerBuf));
+      } else {
+        let html = '';
+        if (thinkingBlock) html += thinkingBlock.outerHTML;
+        html += marked.parse(fixMarkdown(answerBuf));
+        aiContent.innerHTML = html;
+      }
+    } else {
+      let html = '';
+      if (thinkingBlock) html += thinkingBlock.outerHTML;
+      html += marked.parse(fixMarkdown(answerBuf + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`));
+      aiContent.innerHTML = html;
+    }
   }
 
   isStreaming = false;
+  el('btnStop').classList.remove('visible');
+  el('btnSend').style.display = '';
   el('btnSend').disabled = false;
+  abortController = null;
   el('inputBox').focus();
 
   const resp = await api('/api/conversations');

@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
+import pathlib
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = pathlib.Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 CONVERSATIONS_FILE = DATA_DIR / "conversations.json"
@@ -69,7 +69,12 @@ for pk, pv in PROVIDERS.items():
             "available": bool(api_key),
         })
 
-DEFAULT_MODEL = ALL_MODELS[0]["id"] if ALL_MODELS else "mock"
+_DEFAULT_MODEL_ID = "deepseek-v4-flash"
+DEFAULT_MODEL = next((m["id"] for m in ALL_MODELS if m["id"] == _DEFAULT_MODEL_ID and m["available"]), None)
+if DEFAULT_MODEL is None:
+    DEFAULT_MODEL = next((m["id"] for m in ALL_MODELS if m["available"]), None)
+if DEFAULT_MODEL is None:
+    DEFAULT_MODEL = ALL_MODELS[0]["id"] if ALL_MODELS else "mock"
 DEFAULT_SKILL = "general"
 
 # ── Skills ───────────────────────────────────────────────────
@@ -210,12 +215,13 @@ class SendMessageRequest(BaseModel):
     model: str = DEFAULT_MODEL
     thinking: bool = False
     skill: str = DEFAULT_SKILL
+    web_search: bool = True
 
 
 # ── DSML filter ──────────────────────────────────────────────
 
 _DSML_BLOCK_RE = re.compile(
-    r'<\uff5ctool_calls\uff5c>.*?</\uff5ctool_calls\uff5c?>',
+    r'<\uff5ctool_calls>.*?</\uff5ctool_calls>',
     re.DOTALL,
 )
 
@@ -253,14 +259,19 @@ def _parse_dsml_tool_calls(text: str) -> list[dict]:
 
 # ── AI streaming helpers ────────────────────────────────────
 
-async def _ai_stream(client, model_id: str, messages: list, thinking: bool, tools: list = None):
+async def _stream_chat(client, model_id: str, messages: list, thinking: bool, tools: list = None):
+    """Single streaming call that handles tools + content without blocking waits."""
     kwargs = {"model": model_id, "messages": messages, "stream": True}
     if tools:
         kwargs["tools"] = tools
+
     stream = await client.chat.completions.create(**kwargs)
     in_thinking = False
+    tool_call_buf = {}  # idx -> {"id": str, "name": str, "arguments": str}
+
     async for chunk in stream:
         delta = chunk.choices[0].delta
+
         reasoning = getattr(delta, 'reasoning_content', None) or None
         if reasoning:
             if thinking:
@@ -268,85 +279,81 @@ async def _ai_stream(client, model_id: str, messages: list, thinking: bool, tool
                     in_thinking = True
                     yield ("thinking_start", "")
                 yield ("thinking", reasoning)
-        elif delta.content:
-            content = _strip_dsml(delta.content)
-            if not content:
-                continue
-            if in_thinking:
-                in_thinking = False
-                yield ("thinking_done", "")
-            yield ("content", content)
+            continue
+
+        if delta.tool_calls:
+            for tc_delta in delta.tool_calls:
+                idx = tc_delta.index
+                if idx not in tool_call_buf:
+                    tool_call_buf[idx] = {"id": "", "name": "", "arguments": ""}
+                buf = tool_call_buf[idx]
+                if tc_delta.id:
+                    buf["id"] = tc_delta.id
+                if tc_delta.function:
+                    if tc_delta.function.name:
+                        buf["name"] += tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        buf["arguments"] += tc_delta.function.arguments
+            continue
+
+        content = _strip_dsml(delta.content or "")
+        if not content:
+            continue
+        if in_thinking:
+            in_thinking = False
+            yield ("thinking_done", "")
+        yield ("content", content)
+
     if in_thinking:
         yield ("thinking_done", "")
 
+    # If model requested tool calls, execute them and do a follow-up streaming call
+    if tool_call_buf:
+        sorted_calls = sorted(tool_call_buf.items(), key=lambda x: x[0])
 
-async def _try_tool_calls(client, model_id: str, messages: list, tools: list):
-    events = []
-    resp = await client.chat.completions.create(
-        model=model_id,
-        messages=messages,
-        tools=tools,
-        stream=False,
-    )
-    choice = resp.choices[0]
-    raw_tool_calls = choice.message.tool_calls
+        # Yield tool start events
+        for idx, tc in sorted_calls:
+            yield ("tool_start", json.dumps({"name": tc["name"], "args": tc["arguments"]}, ensure_ascii=False))
 
-    # Fallback: parse DSML from content if no standard tool_calls
-    if not raw_tool_calls and choice.message.content:
-        dsml_calls = _parse_dsml_tool_calls(choice.message.content)
-        if dsml_calls:
-            # Build pseudo tool_calls from DSML
-            class PseudoTC:
-                def __init__(self, idx, name, args):
-                    self.id = f"call_{idx}"
-                    self.function = type("fn", (), {
-                        "name": name,
-                        "arguments": json.dumps(args, ensure_ascii=False),
-                    })()
-            raw_tool_calls = [PseudoTC(i, c["name"], c["arguments"]) for i, c in enumerate(dsml_calls)]
+        # Execute tools
+        tool_results = []
+        for idx, tc in sorted_calls:
+            try:
+                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                builtin_names = [t["function"]["name"] for t in BUILTIN_TOOLS]
+                if tc["name"] in builtin_names:
+                    result = await _execute_builtin_tool(tc["name"], args)
+                else:
+                    result = await mcp_manager.call_tool(tc["name"], args)
+                result_str = json.dumps(result, ensure_ascii=False)
+            except Exception as e:
+                result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
+            tool_results.append({"id": tc["id"], "name": tc["name"], "result": result_str})
+            yield ("tool_result", json.dumps({"name": tc["name"], "result": result_str}, ensure_ascii=False))
 
-    if not raw_tool_calls:
-        return events
+        yield ("tool_done", "")
 
-    tool_results = []
-    for tc in choice.message.tool_calls:
-        fn = tc.function
-        events.append(("tool_start", json.dumps({"name": fn.name, "args": fn.arguments}, ensure_ascii=False)))
-        try:
-            args = json.loads(fn.arguments) if fn.arguments else {}
-            # Try builtin tools first, then MCP
-            builtin_names = [t["function"]["name"] for t in BUILTIN_TOOLS]
-            if fn.name in builtin_names:
-                result = await _execute_builtin_tool(fn.name, args)
-            else:
-                result = await mcp_manager.call_tool(fn.name, args)
-            result_str = json.dumps(result, ensure_ascii=False)
-        except Exception as e:
-            result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
-        tool_results.append((tc.id, fn.name, result_str))
-        events.append(("tool_result", json.dumps({"name": fn.name, "result": result_str}, ensure_ascii=False)))
+        # Append tool call + tool result to messages
+        messages.append({
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tr["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tr["name"],
+                        "arguments": next((tc["arguments"] for _, tc in sorted_calls if tc["id"] == tr["id"]), ""),
+                    },
+                }
+                for tr in tool_results
+            ],
+        })
+        for tr in tool_results:
+            messages.append({"role": "tool", "tool_call_id": tr["id"], "content": tr["result"]})
 
-    messages.append({
-        "role": "assistant",
-        "tool_calls": [
-            {
-                "id": tid,
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": json.dumps(args, ensure_ascii=False),
-                },
-            }
-            for (tid, name, args) in [
-                (t[0], t[1], json.loads(t[2]) if t[2] else {}) for t in tool_results
-            ]
-        ],
-    })
-    for tid, name, result_str in tool_results:
-        messages.append({"role": "tool", "tool_call_id": tid, "content": result_str})
-
-    events.append(("tool_done", ""))
-    return events
+        # Follow-up streaming call for the final answer
+        async for evt_type, text in _stream_chat(client, model_id, messages, thinking, None):
+            yield (evt_type, text)
 
 
 async def _mock_stream(user_message: str, model_name: str, thinking: bool, skill_name: str):
@@ -495,7 +502,7 @@ async def send_message(conv_id: str, body: SendMessageRequest):
             f"请完全以该角色的身份和风格回答问题。当被问到'你是谁'时，请以当前角色的身份回答。"
         ),
     })
-    if BUILTIN_TOOLS:
+    if body.web_search:
         ai_messages.append({
             "role": "system",
             "content": (
@@ -519,7 +526,7 @@ async def send_message(conv_id: str, body: SendMessageRequest):
 
     model_meta, provider = _resolve_model(body.model)
     use_ai = model_meta is not None
-    mcp_tools = BUILTIN_TOOLS + (mcp_manager.get_all_tools() if MCP_ENABLED else [])
+    mcp_tools = (BUILTIN_TOOLS if body.web_search else []) + (mcp_manager.get_all_tools() if MCP_ENABLED else [])
 
     async def generate():
         conv["messages"].append({"role": "user", "content": user_content})
@@ -530,27 +537,7 @@ async def send_message(conv_id: str, body: SendMessageRequest):
         try:
             if use_ai:
                 client = _get_client(provider)
-
-                # Phase 1: Try tool calling if MCP is available
-                if mcp_tools:
-                    try:
-                        tool_events = await _try_tool_calls(
-                            client, body.model, ai_messages, mcp_tools
-                        )
-                        for evt_type, text in tool_events:
-                            if evt_type == "tool_start":
-                                yield _send_event("tool_start", text)
-                            elif evt_type == "tool_result":
-                                tool_entries.append(json.loads(text))
-                                yield _send_event("tool_result", text)
-                            elif evt_type == "tool_done":
-                                yield _send_event("tool_done")
-                    except Exception as e:
-                        logger.warning(f"Tool call failed: {e}")
-
-                # Phase 2: Stream final answer (without tools if we already called them)
-                stream_tools = None if tool_entries else (mcp_tools if mcp_tools else None)
-                stream = _ai_stream(client, body.model, ai_messages, body.thinking, stream_tools)
+                stream = _stream_chat(client, body.model, ai_messages, body.thinking, mcp_tools)
             else:
                 stream = _mock_stream(user_content, body.model, body.thinking, skill["name"])
 
@@ -563,6 +550,13 @@ async def send_message(conv_id: str, body: SendMessageRequest):
                 elif evt_type == "content":
                     answer_buf += text
                     yield _send_event("token", text)
+                elif evt_type == "tool_start":
+                    yield _send_event("tool_start", text)
+                elif evt_type == "tool_result":
+                    tool_entries.append(json.loads(text))
+                    yield _send_event("tool_result", text)
+                elif evt_type == "tool_done":
+                    yield _send_event("tool_done")
 
         except Exception as e:
             err = f"\n\n> ⚠️ 错误：{str(e)}"
