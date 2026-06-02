@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Resource Detector</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="container">
+
+  <header class="header">
+    <div class="header-left">
+      <span class="logo-icon">&#x1F50D;</span>
+      <h1>Resource Detector</h1>
+    </div>
+    <span id="status" class="status">Loading...</span>
+  </header>
+
+  <div class="stats-bar" id="statsBar"></div>
+
+  <div class="toolbar">
+    <div class="search-box">
+      <span class="search-icon">&#x1F50E;</span>
+      <input type="text" id="searchInput" placeholder="Filter by URL or filename...">
+      <button id="clearSearch" class="btn-icon" title="Clear">&times;</button>
+    </div>
+    <select id="typeFilter" class="filter-select">
+      <option value="all">All Types</option>
+      <option value="image">Images</option>
+      <option value="script">Scripts</option>
+      <option value="stylesheet">Stylesheets</option>
+      <option value="html">HTML Pages</option>
+      <option value="video">Videos</option>
+      <option value="audio">Audio</option>
+      <option value="font">Fonts</option>
+      <option value="document">Documents</option>
+      <option value="other">Other</option>
+    </select>
+  </div>
+
+  <div class="resource-list" id="resourceList"></div>
+
+  <div class="empty-state hidden" id="emptyState">
+    <div class="empty-icon">&#x1F4E6;</div>
+    <p id="emptyMessage">No resources detected on this page</p>
+    <button id="rescanBtn" class="btn-primary">Rescan</button>
+  </div>
+
+  <div class="progress-bar hidden" id="progressBar">
+    <div class="progress-bar-inner" id="progressBarInner"></div>
+    <span class="progress-label" id="progressLabel">Preparing ZIP...</span>
+  </div>
+
+  <div class="action-bar">
+    <label class="select-all-label">
+      <input type="checkbox" id="selectAll">
+      <span>Select All</span>
+    </label>
+    <span id="selectedCount" class="selected-count">0 selected</span>
+    <button id="downloadSelected" class="btn-primary" disabled>Download Selected</button>
+    <button id="downloadZipBtn" class="btn-zip" disabled title="Pack selected into ZIP">Pack as ZIP</button>
+    <button id="downloadAllBtn" class="btn-zip-all" title="Pack all filtered into ZIP">Download All as ZIP</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>

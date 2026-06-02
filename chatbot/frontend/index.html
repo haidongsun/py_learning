@@ -735,6 +735,7 @@ marked.use({ breaks: true, gfm: true, renderer });
 function fixMarkdown(text) {
   return text
     .replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+    .replace(/^(\s*)(\d+[.)])([^\s])/gm, '$1$2 $3')
     .replace(/^(\s*)([-*+])([^\s])/gm, '$1$2 $3')
     .replace(/^(>)([^\s>])/gm, '$1 $2');
 }
@@ -834,7 +835,7 @@ function thinkingBlockHTML(content) {
         <span>🧠 思考过程</span>
         <span class="arrow collapsed">▼</span>
       </div>
-      <div class="thinking-content collapsed">${marked.parse(fixMarkdown(formatThinking(content)))}</div>
+      <div class="thinking-content collapsed">${marked.parse(fixMarkdown(stripDSML(formatThinking(content))))}</div>
     </div>`;
 }
 
@@ -1084,14 +1085,14 @@ function msgHTML(role, content, thinking, tools) {
   const avatar = role === 'user' ? '👤' : '🤖';
   const cls = role === 'user' ? 'user' : 'ai';
   let body = '';
-  if (role === 'ai') {
+  if (role !== 'user') {
     if (tools && tools.length > 0) {
       for (const t of tools) {
         body += toolBlockHTML(t.name, t.result || t.args || '');
       }
     }
     if (thinking) body += thinkingBlockHTML(thinking);
-    body += marked.parse(fixMarkdown(content));
+    body += marked.parse(fixMarkdown(stripDSML(content)));
   } else {
     body = escapeHtml(content);
   }
@@ -1216,7 +1217,7 @@ async function send() {
               thinkingBuf += data.content;
               if (thinkingBlock) {
                 const tc = thinkingBlock.querySelector('.thinking-content');
-                tc.innerHTML = marked.parse(fixMarkdown(formatThinking(thinkingBuf)));
+                tc.innerHTML = marked.parse(fixMarkdown(stripDSML(formatThinking(thinkingBuf))));
                 scrollBottom();
               }
               break;
@@ -1313,7 +1314,7 @@ async function send() {
                 answerEl.className = 'answer-body';
                 aiContent.appendChild(answerEl);
               }
-              answerEl.innerHTML = marked.parse(fixMarkdown(answerBuf));
+              answerEl.innerHTML = marked.parse(fixMarkdown(stripDSML(answerBuf)));
               answerEl.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
               scrollBottom();
               break;
@@ -1328,17 +1329,17 @@ async function send() {
     if (e.name === 'AbortError') {
       answerBuf += '\n\n> ⏹ 已中断';
       if (answerEl) {
-        answerEl.innerHTML = marked.parse(fixMarkdown(answerBuf));
+        answerEl.innerHTML = marked.parse(fixMarkdown(stripDSML(answerBuf)));
       } else {
         let html = '';
         if (thinkingBlock) html += thinkingBlock.outerHTML;
-        html += marked.parse(fixMarkdown(answerBuf));
+        html += marked.parse(fixMarkdown(stripDSML(answerBuf)));
         aiContent.innerHTML = html;
       }
     } else {
       let html = '';
       if (thinkingBlock) html += thinkingBlock.outerHTML;
-      html += marked.parse(fixMarkdown(answerBuf + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`));
+      html += marked.parse(fixMarkdown(stripDSML(answerBuf + `\n\n> ⚠️ 错误：${escapeHtml(e.message)}`)));
       aiContent.innerHTML = html;
     }
   }

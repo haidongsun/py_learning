@@ -389,7 +389,14 @@ async def _mock_stream(user_message: str, model_name: str, thinking: bool, skill
 
 @app.get("/")
 async def root():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(
+        FRONTEND_DIR / "index.html",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/api/models")
