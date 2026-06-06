@@ -3,166 +3,136 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-_SIZE_UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
+_UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
 
 
 def fmt_size(n: int) -> str:
     if n < 1024:
         return f"{n} B"
-    for u in _SIZE_UNITS[1:]:
+    for u in _UNITS[1:]:
         n /= 1024.0
         if n < 1024:
             return f"{n:.1f} {u}"
     return f"{n:.1f} PB"
 
 
-def _parse_exclude(raw: list) -> set:
-    out = set()
+def _parse_exclude(raw):
+    names = set()
+    exts = set()
     for p in raw:
         if p.startswith('*.'):
-            out.add(('ext', p[1:]))
+            exts.add(p[1:])
         else:
-            out.add(('name', p))
-    return out
+            names.add(p)
+    return names, exts
 
 
-def _is_excluded(name: str, exclude_set: set) -> bool:
-    if ('name', name) in exclude_set:
+def _should_skip(name, hidden, names_set, exts_set):
+    if not hidden and name and name[0] == '.':
         return True
-    _, ext = os.path.splitext(name)
-    if ext and ('ext', ext) in exclude_set:
+    if names_set and name in names_set:
         return True
+    if exts_set:
+        _, ext = os.path.splitext(name)
+        if ext in exts_set:
+            return True
     return False
 
 
-def dir_total_size(dirpath: str, hidden: bool, exclude_set: set) -> int:
-    """Fast recursive sum of all file sizes under a directory."""
+def _dir_size(dirpath, hidden, names_set, exts_set):
+    """Recursive sum of all file sizes under dirpath."""
     total = 0
     try:
         with os.scandir(dirpath) as it:
             for entry in it:
-                name = entry.name
-                if not hidden and name.startswith('.'):
+                if _should_skip(entry.name, hidden, names_set, exts_set):
                     continue
-                if exclude_set and _is_excluded(name, exclude_set):
-                    continue
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        total += dir_total_size(entry.path, hidden, exclude_set)
-                    elif entry.is_file(follow_symlinks=False):
+                if entry.is_dir(follow_symlinks=False):
+                    total += _dir_size(entry.path, hidden, names_set, exts_set)
+                elif entry.is_file(follow_symlinks=False):
+                    try:
                         total += entry.stat(follow_symlinks=False).st_size
-                except OSError:
-                    continue
+                    except OSError:
+                        pass
     except OSError:
         pass
     return total
 
 
-def scan_current(dirpath: str, hidden: bool, exclude_set: set, min_size: int):
-    """Scan current directory — returns [(name, size, is_dir), ...]."""
+def scan(root, hidden, names_set, exts_set, min_size, parallel=True):
     items = []
+    dir_tasks = []
+
     try:
-        with os.scandir(dirpath) as it:
+        with os.scandir(root) as it:
             for entry in it:
-                name = entry.name
-                if not hidden and name.startswith('.'):
+                if _should_skip(entry.name, hidden, names_set, exts_set):
                     continue
-                if exclude_set and _is_excluded(name, exclude_set):
-                    continue
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        sz = dir_total_size(entry.path, hidden, exclude_set)
-                    elif entry.is_file(follow_symlinks=False):
+                if entry.is_dir(follow_symlinks=False):
+                    dir_tasks.append((entry.path, entry.name))
+                elif entry.is_file(follow_symlinks=False):
+                    try:
                         sz = entry.stat(follow_symlinks=False).st_size
-                    else:
+                    except OSError:
                         continue
-                except OSError:
-                    continue
-                if sz < min_size:
-                    continue
-                items.append((name, sz, entry.is_dir(follow_symlinks=False)))
+                    if sz >= min_size:
+                        items.append((entry.name, sz, False))
     except OSError:
         pass
+
+    if dir_tasks:
+        if parallel and len(dir_tasks) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(dir_tasks), (os.cpu_count() or 4))) as pool:
+                futures = {
+                    pool.submit(_dir_size, d[0], hidden, names_set, exts_set): d
+                    for d in dir_tasks
+                }
+                for fut in as_completed(futures):
+                    name = futures[fut][1]
+                    sz = fut.result()
+                    if sz >= min_size:
+                        items.append((name, sz, True))
+        else:
+            for dpath, name in dir_tasks:
+                sz = _dir_size(dpath, hidden, names_set, exts_set)
+                if sz >= min_size:
+                    items.append((name, sz, True))
+
+    items.sort(key=lambda x: x[1], reverse=True)
     return items
 
 
-def walk_recursive(root: str, hidden: bool, exclude_set: set, min_size: int,
-                   max_depth: int, root_files: list):
-    """Recursive scan of subdirectories. Returns list of (fullpath, size, ext)."""
-    files = list(root_files)
-    root = os.path.abspath(root)
-    root_file_names = {os.path.basename(f[0]) for f in root_files}
-    stack = [(root, 0)]
-
-    while stack:
-        cur, depth = stack.pop()
-        new_depth = 1 if depth == 0 else depth + 1
-        try:
-            with os.scandir(cur) as it:
-                for entry in it:
-                    name = entry.name
-                    if depth == 0 and name in root_file_names:
-                        continue
-                    if not hidden and name.startswith('.'):
-                        continue
-                    if exclude_set and _is_excluded(name, exclude_set):
-                        continue
-                    try:
-                        is_dir = entry.is_dir(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    if is_dir:
-                        if max_depth < 0 or depth < max_depth:
-                            stack.append((entry.path, new_depth))
-                    else:
-                        try:
-                            sz = entry.stat(follow_symlinks=False).st_size
-                        except OSError:
-                            continue
-                        if sz < min_size:
-                            continue
-                        files.append((entry.path, sz, os.path.splitext(name)[1].lower() or "(none)"))
-        except OSError:
-            continue
-
-    return files
-
-
-def print_items(items, root: str, recursive: bool = False):
+def print_items(items, root):
     bar = "=" * 60
-    tag = "[recursive]" if recursive else ""
     print(f"\n{bar}")
-    print(f"  {root} {tag}")
+    print(f"  {root}")
     print(f"{bar}")
     if not items:
         print("  (empty)")
         return
 
-    items_sorted = sorted(items, key=lambda x: x[1], reverse=True)
-    max_name = min(max(len(str(i[0])) for i in items_sorted) + 4, 50)
+    name_w = min(max(len(n) for n, _, _ in items) + 4, 50)
+    print(f"  {'Name':<{name_w}} {'Size':>10}  Type")
+    print(f"  {'-' * (name_w + 20)}")
+    for name, sz, is_dir in items:
+        print(f"  {name:<{name_w}} {fmt_size(sz):>10}  {'<DIR>' if is_dir else ''}")
 
-    print(f"  {'Name':<{max_name}} {'Size':>10}  Type")
-    print(f"  {'-'*(max_name + 20)}")
-    for name, sz, is_dir in items_sorted:
-        kind = "<DIR>" if is_dir else ""
-        print(f"  {name:<{max_name}} {fmt_size(sz):>10}  {kind}")
-
-    total = sum(sz for _, sz, _ in items_sorted)
-    print(f"  {'-'*(max_name + 20)}")
-    print(f"  {len(items_sorted)} item(s),  {fmt_size(total)}")
+    total = sum(sz for _, sz, _ in items)
+    print(f"  {'-' * (name_w + 20)}")
+    print(f"  {len(items)} item(s),  {fmt_size(total)}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fast file resource statistics")
     parser.add_argument("path", nargs="?", default=".", help="Directory to scan (default: .)")
     parser.add_argument("-a", "--all", action="store_true", dest="hidden", help="Include hidden files")
-    parser.add_argument("-e", "--exclude", nargs="*", default=[], metavar="P", help="Exclude patterns (e.g. '*.pyc')")
+    parser.add_argument("-e", "--exclude", nargs="*", default=[], metavar="P",
+                        help="Exclude patterns (e.g. '*.pyc' 'node_modules')")
     parser.add_argument("-m", "--min-size", type=int, default=0, help="Min file size in bytes")
     parser.add_argument("-j", "--json", action="store_true", help="JSON output")
-    parser.add_argument("-r", "--recursive", action="store_true", help="Show all files recursively (no dir rollup)")
-    parser.add_argument("-d", "--max-depth", type=int, default=-1, help="Max depth for -r mode (-1=unlimited)")
+    parser.add_argument("-p", "--parallel", action="store_true", help="Enable parallel dir scanning (for large trees)")
     args = parser.parse_args()
 
     root = os.path.abspath(args.path)
@@ -170,36 +140,24 @@ def main():
         print(f"'{args.path}' is not a valid directory", file=sys.stderr)
         sys.exit(1)
 
-    exclude_set = _parse_exclude(args.exclude) if args.exclude else set()
+    names_set, exts_set = _parse_exclude(args.exclude)
     t0 = time.perf_counter()
 
-    if args.recursive:
-        cur_files = []
-        for f, sz, _ in scan_current(root, args.hidden, exclude_set, args.min_size):
-            cur_files.append((os.path.join(root, f), sz, os.path.splitext(f)[1].lower() or "(none)"))
-
-        all_files = walk_recursive(root, args.hidden, exclude_set, args.min_size, args.max_depth, cur_files)
-        items = [(os.path.relpath(f[0], root), f[1], False) for f in all_files]
-        is_recursive = True
-    else:
-        items = scan_current(root, args.hidden, exclude_set, args.min_size)
-        is_recursive = False
+    items = scan(root, args.hidden, names_set, exts_set, args.min_size,
+                 parallel=args.parallel)
 
     t1 = time.perf_counter()
 
     if args.json:
-        output = {
+        print(json.dumps({
             "path": root,
             "elapsed_ms": round((t1 - t0) * 1000, 2),
-            "items": [
-                {"name": str(n), "size": sz, "size_human": fmt_size(sz), "is_dir": d}
-                for n, sz, d in sorted(items, key=lambda x: x[1], reverse=True)
-            ]
-        }
-        print(json.dumps(output, indent=2, ensure_ascii=False))
+            "items": [{"name": n, "size": sz, "size_human": fmt_size(sz), "is_dir": d}
+                      for n, sz, d in items]
+        }, indent=2, ensure_ascii=False))
         return
 
-    print_items(items, root, recursive=is_recursive)
+    print_items(items, root)
     print(f"\n  Done in {((t1 - t0) * 1000):.1f} ms\n")
 
 
