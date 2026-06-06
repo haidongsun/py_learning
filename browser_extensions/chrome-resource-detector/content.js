@@ -78,6 +78,68 @@
     }
   }
 
+  function computeRelativePath(fromPath, toPath) {
+    var fromParts = fromPath.split('/');
+    fromParts.pop();
+    var toParts = toPath.split('/');
+    var common = 0;
+    while (common < fromParts.length && common < toParts.length && fromParts[common] === toParts[common]) {
+      common++;
+    }
+    var result = [];
+    for (var i = common; i < fromParts.length; i++) {
+      result.push('..');
+    }
+    for (var i = common; i < toParts.length; i++) {
+      result.push(toParts[i]);
+    }
+    return result.join('/') || '.';
+  }
+
+  function rewriteHtmlUrls(html, urlToPath, htmlPathname) {
+    function resolveAndRewrite(rawUrl) {
+      if (!rawUrl || rawUrl.startsWith('data:') || rawUrl.startsWith('javascript:') ||
+          rawUrl.startsWith('#') || rawUrl.startsWith('blob:') || rawUrl.startsWith('mailto:')) {
+        return rawUrl;
+      }
+      try {
+        var resolved = new URL(rawUrl, pageUrl).href;
+        var targetPath = urlToPath[resolved];
+        if (targetPath) {
+          return computeRelativePath(htmlPathname, targetPath);
+        }
+      } catch (e) {}
+      return rawUrl;
+    }
+
+    html = html.replace(/(src|href)=["']([^"']+)["']/gi, function (m, attr, url) {
+      return attr + '="' + resolveAndRewrite(url) + '"';
+    });
+
+    html = html.replace(/srcset=["']([^"']+)["']/gi, function (m, srcset) {
+      var parts = srcset.split(',');
+      var rewritten = [];
+      for (var i = 0; i < parts.length; i++) {
+        var trimmed = parts[i].trim();
+        var spaceIdx = trimmed.lastIndexOf(' ');
+        if (spaceIdx > 0) {
+          rewritten.push(resolveAndRewrite(trimmed.substring(0, spaceIdx)) + trimmed.substring(spaceIdx));
+        } else {
+          rewritten.push(resolveAndRewrite(trimmed));
+        }
+      }
+      return 'srcset="' + rewritten.join(', ') + '"';
+    });
+
+    html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, function (m, url) {
+      url = url.trim();
+      if (url.startsWith('data:')) return m;
+      return 'url(' + resolveAndRewrite(url) + ')';
+    });
+
+    return html;
+  }
+
   function addResource(url, elementType, size, initiatorType) {
     if (!url) return;
     if (url.startsWith('chrome-extension://') || url.startsWith('moz-extension://')) return;
@@ -315,10 +377,15 @@
         if (a.type !== b.type) return a.type.localeCompare(b.type);
         return a.filename.localeCompare(b.filename);
       });
+      var urlToPath = {};
+      for (var i = 0; i < arr.length; i++) {
+        urlToPath[arr[i].url] = arr[i].pathname;
+      }
       for (var i = 0; i < arr.length; i++) {
         if (arr[i].url === pageUrl && arr[i].type === 'html') {
           try {
             var html = document.documentElement.outerHTML;
+            html = rewriteHtmlUrls(html, urlToPath, arr[i].pathname);
             arr[i].htmlContent = btoa(unescape(encodeURIComponent(html)));
           } catch (e) {}
         }
