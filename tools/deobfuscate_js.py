@@ -1,14 +1,14 @@
 """
-通用 JS 去混淆脚本 — 覆盖最常见的前端混淆模式。
+通用 JS 去混淆脚本 — 支持单文件和整个目录（多 JS 文件拆分场景）。
 
 用法:
-    python deobfuscate_js.py input.js [output.js]
+    python deobfuscate_js.py input.js [output.js]        # 单文件
+    python deobfuscate_js.py js_source_dir/              # 整个目录
 
-增强的 webpack 拆分:
-    1. 识别模块原始路径（如 ./src/utils.js）
-    2. 模块内 require(n) 自动解析为可读引用
-    3. 生成依赖图 (.depgraph)
-    4. 每个模块独立再做一轮字符串还原
+多文件模式:
+    1. 先扫描所有 .js 文件，收集全局混淆上下文（字符串数组 + 查表函数）
+    2. 再逐文件应用还原（本文件的 + 跨文件的，串联全局作用域）
+    3. 输出到 cleaned/ 子目录，保持原有目录结构
 """
 
 import re
@@ -19,13 +19,12 @@ import json
 from pathlib import Path
 
 
-# ───────────────────── 工具函数 ─────────────────────
+# ───────────────────── 基础工具 ─────────────────────
 
 def safe_eval_js_array(code: str):
-    """试图从 JS 代码中提取字符串数组并安全求值。"""
+    """提取 JS 字符串数组并安全解析返回 (strings_list, var_name)。"""
     patterns = [
-        r'var\s+(\w+)\s*=\s*(\[[^\]]*(?:\][^\]]*)*?\])\s*;',
-        r'const\s+(\w+)\s*=\s*(\[[^\]]*(?:\][^\]]*)*?\])\s*;',
+        r'(?:var|const|let)\s+(\w+)\s*=\s*(\[[^\]]*(?:\][^\]]*)*?\])\s*;',
         r'(\w+)\s*=\s*(\[[^\]]*(?:\][^\]]*)*?\])\s*;',
     ]
     for pat in patterns:
@@ -44,10 +43,11 @@ def safe_eval_js_array(code: str):
 
 
 def find_lookup_function(code: str, arr_name: str) -> str | None:
+    """找到引用指定数组的查表函数名。"""
     patterns = [
-        rf'function\s+(\w+)\s*\([^)]*\)\s*\{{[^}}]*{arr_name}',
-        rf'var\s+(\w+)\s*=\s*function\s*\([^)]*\)\s*\{{[^}}]*{arr_name}',
-        rf'(\w+)\s*=\s*function\s*\([^)]*\)\s*\{{[^}}]*{arr_name}',
+        rf'function\s+(\w+)\s*\([^)]*\)\s*\{{[^}}]*\b{arr_name}\b',
+        rf'(?:var|const|let)\s+(\w+)\s*=\s*function\s*\([^)]*\)\s*\{{[^}}]*\b{arr_name}\b',
+        rf'(\w+)\s*=\s*function\s*\([^)]*\)\s*\{{[^}}]*\b{arr_name}\b',
     ]
     for pat in patterns:
         m = re.search(pat, code)
@@ -56,21 +56,22 @@ def find_lookup_function(code: str, arr_name: str) -> str | None:
     return None
 
 
-def extract_shift_amount(lookup_body: str) -> int:
-    m = re.search(r'-\s*(0x[0-9a-fA-F]+)', lookup_body)
+def extract_shift_amount(func_body: str) -> int:
+    m = re.search(r'-\s*(0x[0-9a-fA-F]+)', func_body)
     if m:
         return int(m.group(1), 16)
-    m = re.search(r'-\s*(\d+)', lookup_body)
+    m = re.search(r'-\s*(\d+)', func_body)
     if m:
         return int(m.group(1))
     return 0
 
 
 def replace_string_calls(code: str, strings: list, func_name: str, shift: int = 0) -> str:
+    """将 func_name('idx') 替换为实际字符串。"""
     def replacer(m):
         arg = m.group(2)
         try:
-            if arg.startswith('0x') or arg.startswith('0X'):
+            if arg.startswith(('0x', '0X')):
                 idx = int(arg, 16) - shift
             else:
                 idx = int(arg) - shift
@@ -98,58 +99,46 @@ def unpack_evals(code: str, max_depth: int = 5) -> str:
     return code
 
 
-# ───────────────────── Webpack 模块解析 ─────────────────────
+# ───────────────────── webpack 模块拆分 ─────────────────────
 
 def bracket_extract(text: str, start_pos: int) -> tuple[str, int]:
-    """从 start_pos 处提取一对大括号内的内容（处理嵌套），返回(内容, 结束位置)。"""
+    """用深度计数提取大括号内容，处理嵌套和字符串字面量。"""
     depth = 0
     i = start_pos
     while i < len(text):
-        if text[i] == '{':
+        c = text[i]
+        if c == '{':
             depth += 1
-        elif text[i] == '}':
+        elif c == '}':
             depth -= 1
             if depth == 0:
                 return text[start_pos:i], i + 1
-        elif text[i] == '"' or text[i] == "'":
-            q = text[i]
+        elif c in ('"', "'"):
+            q = c
             i += 1
             while i < len(text) and text[i] != q:
                 if text[i] == '\\':
                     i += 1
                 i += 1
-            continue
         i += 1
     return "", -1
 
 
 def parse_webpack_modules(code: str) -> dict:
-    """
-    解析 webpack 模块对象，返回:
-        { module_id: { body, requires, original_name } }
-    
-    module_id 可能是数字字符串或路径字符串。
-    requires 是该模块中调用的其他模块 ID 列表。
-    """
-    # 查找模块对象起始: { 123: or { "./src/":
     m = re.search(r'\{\s*(["\']?)(\d+|[./\w-]+)\1\s*:\s*function\s*\(([^)]*)\)\s*\{', code)
     if not m:
         return {}
 
-    # 从这里开始用 bracket 计数解析整个对象
-    obj_start = code.index(m.group(0))  # 开头的 {
+    obj_start = code.index(m.group(0))
     modules_code, obj_end = bracket_extract(code, obj_start)
     if not modules_code:
         return {}
 
     modules = {}
-    # 解析键值对: key: function(params){ body }
-    # 用简单的 split-on-key 方式
     pos = 0
     content = modules_code.strip()
-    
+
     while pos < len(content):
-        # 匹配键: "key" 或 'key' 或 key
         key_match = re.match(
             r'\s*(["\']?)([^"\':,\s]+)\1\s*:\s*function\s*\(([^)]*)\)\s*(\{)',
             content[pos:], re.DOTALL
@@ -160,35 +149,27 @@ def parse_webpack_modules(code: str) -> dict:
                 content[pos:], re.DOTALL
             )
         if not key_match:
-            # 可能是箭头函数没有花括号
             key_match = re.match(
                 r'\s*(["\']?)([^"\':,\s]+)\1\s*:\s*(?:function\s*)?\(([^)]*)\)\s*=>',
                 content[pos:], re.DOTALL
             )
-            if key_match:
-                # 箭头函数直接返回，匹配到分号或逗号
-                simple = True
-            else:
+            if not key_match:
                 pos += 1
                 continue
-        
+
         mod_id = key_match.group(2)
         params = key_match.group(3)
-        
-        # 找到函数体
+
         brace_start = pos + key_match.start(4)
         body, brace_end = bracket_extract(content, brace_start)
         if brace_end == -1:
             pos += len(key_match.group(0))
             continue
 
-        full_body = content[brace_start + 1:brace_end - 1]  # 去掉外层花括号
-        
-        # 提取 require 参数名（通常是第三个参数）
+        full_body = content[brace_start + 1:brace_end - 1]
         param_list = [p.strip() for p in params.split(',')]
         require_name = param_list[2] if len(param_list) >= 3 else 'n'
 
-        # 在函数体中找所有 require(name) 调用
         requires = []
         for rm in re.finditer(rf'\b{re.escape(require_name)}\s*\(\s*(\d+)\s*\)', full_body):
             requires.append(rm.group(1))
@@ -199,88 +180,171 @@ def parse_webpack_modules(code: str) -> dict:
             'params': params,
             'require_name': require_name,
         }
-        
-        pos = brace_end + 1  # 跳过 }
+        pos = brace_end + 1
 
     return modules
 
 
 def resolve_require_calls(modules: dict) -> dict:
-    """将每个模块内的 require(123) 替换为 /* module_123 */ 注释标记。"""
     resolved = {}
+    name_map = {}
+    for mid in modules:
+        if mid.startswith('./') or mid.startswith('../'):
+            name_map[mid] = mid
+        else:
+            name_map[mid] = f"module_{mid}"
+
     for mod_id, info in modules.items():
         body = info['body']
         rname = info['require_name']
-        # 构建模块名映射（尝试用原始路径名）
-        name_map = {}
-        for mid in modules:
-            if mid.startswith('./') or mid.startswith('../'):
-                name_map[mid] = mid
-            else:
-                name_map[mid] = f"module_{mid}"
-        
+
         def replacer(m):
             rid = m.group(1)
             label = name_map.get(rid, f"module_{rid}")
             return f'{rname}({rid}) /* → {label} */'
-        
+
         body = re.sub(rf'\b{re.escape(rname)}\s*\(\s*(\d+)\s*\)', replacer, body)
         resolved[mod_id] = {**info, 'body': body}
     return resolved
 
 
-def build_depgraph(modules: dict) -> dict:
-    """构建依赖关系图。"""
-    graph = {}
+def export_webpack_to_files(code: str, input_path: str, strings=None, func_name=None, shift=0):
+    """解析 webpack 模块并导出为独立文件 + 依赖图。"""
+    modules = parse_webpack_modules(code)
+    if not modules:
+        return None
+
+    if strings and func_name:
+        for mod_id in modules:
+            modules[mod_id]['body'] = replace_string_calls(
+                modules[mod_id]['body'], strings, func_name, shift
+            )
+
+    modules = resolve_require_calls(modules)
+    depgraph = {mid: info['requires'] for mid, info in modules.items()}
+
+    parent = os.path.dirname(input_path) or '.'
+    out_dir = os.path.join(parent, 'webpack_modules')
+    os.makedirs(out_dir, exist_ok=True)
+
     for mod_id, info in modules.items():
-        graph[mod_id] = info['requires']
-    return graph
+        deps_comment = ""
+        if info['requires']:
+            deps_comment = f"// depends on: [{', '.join(info['requires'])}]\n"
+
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', mod_id)
+        fname = os.path.join(out_dir, f"{safe_name}.js")
+        with open(fname, 'w', encoding='utf-8') as f:
+            f.write(f"// module: {mod_id}\n")
+            f.write(f"// (module, exports, require) = ({info['params']})\n")
+            f.write(deps_comment)
+            f.write(f"// {'='*48}\n\n")
+            f.write(info['body'])
+            f.write("\n")
+
+    with open(os.path.join(out_dir, '.depgraph.json'), 'w', encoding='utf-8') as f:
+        json.dump(depgraph, f, indent=2, ensure_ascii=False)
+
+    return modules
 
 
-def extract_chunk_name(code: str, module_id: str) -> str:
-    """尝试从代码上下文中找到模块 ID 对应的原始路径名。
-    Webpack 有时在 push 时会传入路径映射。
+# ───────────────────── 多文件扫描 & 上下文 ─────────────────────
+
+def scan_file_for_context(filepath: str) -> list[dict]:
     """
-    # 模式: webpackJsonp([1], {"./src/app.js": function(...) { ... }})
-    # 或模块映射表
-    patterns = [
-        # 直接路径键
-        rf'["\']({re.escape(module_id)})["\']',
-        # 数字到路径映射
-        rf'{re.escape(module_id)}\s*:\s*["\']([^"\']+)["\']',
-        rf'["\']([^"\']+)["\']\s*:\s*{re.escape(module_id)}',
-    ]
-    # 简单返回 module_id 本身（如果它已经是路径）
-    return module_id
+    扫描单个 JS 文件，提取所有混淆上下文。
+    返回: [{strings, func_name, shift, arr_name}, ...]
+    """
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        code = f.read()
+
+    contexts = []
+    result = safe_eval_js_array(code)
+    if not result:
+        return contexts
+
+    strings, arr_name = result
+    func_name = find_lookup_function(code, arr_name)
+    if not func_name:
+        return contexts
+
+    shift = 0
+    for pat in [
+        rf'function\s+{re.escape(func_name)}\s*\([^)]*\)\s*\{{([^}}]+)\}}',
+        rf'{re.escape(func_name)}\s*=\s*function\s*\([^)]*\)\s*\{{([^}}]+)\}}',
+    ]:
+        fm = re.search(pat, code)
+        if fm:
+            shift = extract_shift_amount(fm.group(1))
+            break
+
+    contexts.append({
+        'strings': strings,
+        'func_name': func_name,
+        'shift': shift,
+        'arr_name': arr_name,
+        'source_file': filepath,
+    })
+
+    return contexts
+
+
+def scan_directory(dirpath: str) -> dict[str, list[dict]]:
+    """
+    扫描目录下所有 .js 文件，返回全局混淆上下文:
+        { filepath: [context1, context2, ...], ... }
+    """
+    all_contexts = {}
+    for root, dirs, files in os.walk(dirpath):
+        # 跳过输出目录
+        dirs[:] = [d for d in dirs if d not in ('cleaned', 'webpack_modules', '.git', 'node_modules')]
+        for fname in files:
+            if fname.endswith('.js'):
+                fpath = os.path.join(root, fname)
+                ctx = scan_file_for_context(fpath)
+                if ctx:
+                    all_contexts[fpath] = ctx
+    return all_contexts
+
+
+def build_global_context_map(file_contexts: dict[str, list[dict]]) -> dict[str, dict]:
+    """
+    构建 "查表函数名 → 完整上下文" 的全局映射。
+    跨文件共享时，靠函数名匹配。
+    """
+    global_map = {}
+    for contexts in file_contexts.values():
+        for ctx in contexts:
+            key = ctx['func_name']
+            if key not in global_map:
+                global_map[key] = ctx
+    return global_map
 
 
 # ───────────────────── 主流程 ─────────────────────
 
-def deobfuscate(input_path: str, output_path: str | None = None):
-    with open(input_path, 'r', encoding='utf-8') as f:
+def deobfuscate_single(input_path: str, output_path: str | None = None):
+    """单文件模式。"""
+    with open(input_path, 'r', encoding='utf-8', errors='ignore') as f:
         code = f.read()
 
     original_size = len(code)
     print(f"  输入: {input_path} ({original_size} 字符)\n")
 
-    # ── 步骤1: 展开 eval ──
+    # ① 展开 eval
     code = unpack_evals(code)
     if len(code) != original_size:
-        print(f"  [1] eval 展开完成 ({original_size} → {len(code)} 字符)")
+        print(f"  [1] eval 展开: {original_size} → {len(code)} 字符")
 
-    # ── 步骤2: 提取字符串数组 ──
+    # ② 字符串还原
+    strings, func_name, shift = None, None, 0
     result = safe_eval_js_array(code)
-    strings = None
-    func_name = None
-    shift = 0
-
     if result:
         strings, arr_name = result
-        print(f"  [2] 找到字符串数组: {arr_name} ({len(strings)} 项)")
-
         func_name = find_lookup_function(code, arr_name)
         if func_name:
-            print(f"  [2] 找到查找函数: {func_name}")
+            print(f"  [2] 字符串数组: {arr_name} ({len(strings)} 项), 查表函数: {func_name}")
+
             for pat in [
                 rf'function\s+{re.escape(func_name)}\s*\([^)]*\)\s*\{{([^}}]+)\}}',
                 rf'{re.escape(func_name)}\s*=\s*function\s*\([^)]*\)\s*\{{([^}}]+)\}}',
@@ -292,76 +356,20 @@ def deobfuscate(input_path: str, output_path: str | None = None):
             print(f"  [2] 偏移量: {shift}")
 
             code = replace_string_calls(code, strings, func_name, shift)
-            print(f"  [2] 字符串还原完成")
-
             code = unpack_evals(code)
+            print(f"  [2] 字符串还原完成")
     else:
         print(f"  [2] 未找到字符串数组（跳过）")
 
-    # ── 步骤3: 解析 webpack 模块 ──
-    print(f"\n  [3] 解析 webpack 模块...")
-    modules = parse_webpack_modules(code)
-
-    if not modules:
-        print(f"  [3] 未识别到 webpack 模块结构")
+    # ③ webpack 拆分
+    print(f"\n  [3] 尝试 webpack 模块拆分...")
+    modules = export_webpack_to_files(code, input_path, strings, func_name, shift)
+    if modules:
+        print(f"  [3] 导出 {len(modules)} 个模块 → webpack_modules/")
     else:
-        # 再对每个模块应用字符串还原
-        if strings and func_name:
-            for mod_id in modules:
-                modules[mod_id]['body'] = replace_string_calls(
-                    modules[mod_id]['body'], strings, func_name, shift
-                )
+        print(f"  [3] 未识别到 webpack 结构")
 
-        # 解析 require 调用为可读引用
-        modules = resolve_require_calls(modules)
-
-        # 生成依赖图
-        depgraph = build_depgraph(modules)
-
-        # 导出模块
-        out_dir = os.path.join(os.path.dirname(input_path) or '.', 'webpack_modules')
-        os.makedirs(out_dir, exist_ok=True)
-
-        for mod_id, info in modules.items():
-            # 生成本地变量注释
-            params = [p.strip() for p in info['params'].split(',')]
-            param_comment = f"// module, exports, require = ({info['params']})"
-            deps_comment = ""
-            if info['requires']:
-                deps = ', '.join(info['requires'])
-                deps_comment = f"// depends on: [{deps}]"
-
-            safe_name = re.sub(r'[<>:"/\\|?*]', '_', mod_id)
-            fname = os.path.join(out_dir, f"{safe_name}.js")
-            with open(fname, 'w', encoding='utf-8') as f:
-                f.write(f"// module: {mod_id}\n")
-                f.write(param_comment + "\n")
-                if deps_comment:
-                    f.write(deps_comment + "\n")
-                f.write("// ================================================\n\n")
-                f.write(info['body'])
-                f.write("\n")
-
-        # 保存依赖图
-        depgraph_path = os.path.join(out_dir, '.depgraph.json')
-        with open(depgraph_path, 'w', encoding='utf-8') as f:
-            json.dump(depgraph, f, indent=2, ensure_ascii=False)
-
-        print(f"  [3] 导出 {len(modules)} 个 webpack 模块 → {out_dir}/")
-        print(f"  [3] 依赖图 → {depgraph_path}")
-
-        # 替换原文件中的 require 调用
-        if func_name and strings:
-            rname_map = {info['require_name'] for info in modules.values()}
-            for rn in rname_map:
-                def make_replacer(rn=rn):
-                    def replacer(m):
-                        rid = m.group(1)
-                        return f'{rn}({rid}) /* → module_{rid} */'
-                    return replacer
-                code = re.sub(rf'\b{re.escape(rn)}\s*\(\s*(\d+)\s*\)', make_replacer(), code)
-
-    # ── 步骤4: 输出结果 ──
+    # ④ 输出
     if output_path is None:
         base, ext = os.path.splitext(input_path)
         output_path = base + '.clean' + ext
@@ -369,14 +377,140 @@ def deobfuscate(input_path: str, output_path: str | None = None):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(code)
 
-    print(f"\n  [✓] 输出去混淆文件: {output_path} ({len(code)} 字符)")
-    print(f"  [✓] 下一步: npx prettier --write {output_path}")
+    print(f"\n  [✓] 输出: {output_path} ({len(code)} 字符)")
 
+
+def deobfuscate_directory(dirpath: str):
+    """多文件目录模式 —— 先扫描全局上下文，再逐文件还原。"""
+    print(f"  [0] 扫描目录: {dirpath}\n")
+
+    # ── 阶段 1: 全局扫描 ──
+    print(f"  [1] 扫描所有 .js 文件，收集混淆上下文...")
+    file_contexts = scan_directory(dirpath)
+    global_map = build_global_context_map(file_contexts)
+
+    context_files = []
+    for fpath, ctxs in file_contexts.items():
+        for ctx in ctxs:
+            context_files.append(f"    {os.path.relpath(fpath, dirpath)}: {ctx['func_name']}() ← [{ctx['arr_name']}] x{len(ctx['strings'])}")
+
+    if context_files:
+        print(f"  [1] 发现 {len(context_files)} 个混淆上下文:")
+        for cf in context_files:
+            print(cf)
+    else:
+        print(f"  [1] 未发现任何混淆上下文，仅做 eval 展开")
+
+    print(f"\n  [1] 全局查表函数映射: {list(global_map.keys())}")
+
+    # ── 阶段 2: 收集所有需要处理的文件 ──
+    all_files = []
+    for root, dirs, files in os.walk(dirpath):
+        dirs[:] = [d for d in dirs if d not in ('cleaned', 'webpack_modules', '.git', 'node_modules')]
+        for fname in files:
+            if fname.endswith('.js'):
+                all_files.append(os.path.join(root, fname))
+
+    print(f"\n  [2] 处理 {len(all_files)} 个文件...\n")
+
+    # ── 阶段 3: 逐文件还原 ──
+    out_dir = os.path.join(dirpath, 'cleaned')
+    os.makedirs(out_dir, exist_ok=True)
+    webpack_root = os.path.join(out_dir, 'webpack_modules')
+
+    stats = {'processed': 0, 'strings_replaced': 0, 'eval_unpacked': 0}
+
+    for fpath in all_files:
+        rel = os.path.relpath(fpath, dirpath)
+        out_path = os.path.join(out_dir, rel)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+            code = f.read()
+
+        original_size = len(code)
+
+        # 3a: 展开 eval
+        code = unpack_evals(code)
+        if len(code) != original_size:
+            stats['eval_unpacked'] += 1
+
+        # 3b: 应用所有全局上下文中的字符串还原
+        any_replaced = False
+        for func_name, ctx in global_map.items():
+            # 检查当前文件中是否使用了这个查表函数
+            if re.search(rf'\b{re.escape(func_name)}\s*\(', code):
+                code = replace_string_calls(code, ctx['strings'], func_name, ctx['shift'])
+                any_replaced = True
+
+        if any_replaced:
+            stats['strings_replaced'] += 1
+            code = unpack_evals(code)  # 还原后可能有新的 eval 可展开
+
+        # 3c: 尝试 webpack 拆分（只在含模块结构的文件中）
+        modules = parse_webpack_modules(code)
+        if modules:
+            # 对模块再应用一次字符串还原
+            if any_replaced:
+                for func_name, ctx in global_map.items():
+                    for mod_id in modules:
+                        modules[mod_id]['body'] = replace_string_calls(
+                            modules[mod_id]['body'], ctx['strings'], func_name, ctx['shift']
+                        )
+            modules = resolve_require_calls(modules)
+
+            # 导出模块文件
+            safe_rel = re.sub(r'[<>:"|?*]', '_', rel)
+            mod_dir = os.path.join(webpack_root, os.path.splitext(safe_rel.replace(os.sep, '_'))[0])
+            os.makedirs(mod_dir, exist_ok=True)
+
+            for mod_id, info in modules.items():
+                deps_comment = ""
+                if info['requires']:
+                    deps_comment = f"// depends on: [{', '.join(info['requires'])}]\n"
+                safe_name = re.sub(r'[<>:"/\\|?*]', '_', mod_id)
+                with open(os.path.join(mod_dir, f"{safe_name}.js"), 'w', encoding='utf-8') as mf:
+                    mf.write(f"// module: {mod_id}\n")
+                    mf.write(f"// (module, exports, require) = ({info['params']})\n")
+                    mf.write(deps_comment)
+                    mf.write(f"// {'='*48}\n\n")
+                    mf.write(info['body'])
+                    mf.write("\n")
+
+            depgraph = {mid: info['requires'] for mid, info in modules.items()}
+            with open(os.path.join(mod_dir, '.depgraph.json'), 'w', encoding='utf-8') as df:
+                json.dump(depgraph, df, indent=2, ensure_ascii=False)
+
+            print(f"  {rel}: {len(modules)} webpack 模块 → {mod_dir}/")
+
+        # 3d: 输出清理后的文件
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+        stats['processed'] += 1
+
+    # ── 阶段 4: 报告 ──
+    print(f"\n  {'='*60}")
+    print(f"  [✓] 处理完成: {stats['processed']} 个文件")
+    print(f"  [✓] 字符串还原: {stats['strings_replaced']} 个文件")
+    print(f"  [✓] eval 展开: {stats['eval_unpacked']} 个文件")
+    print(f"  [✓] 输出目录: {out_dir}/")
+    print(f"  [✓] 下一步: npx prettier --write \"{out_dir}/**/*.js\"")
+
+
+# ───────────────────── 入口 ─────────────────────
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("用法: python deobfuscate_js.py input.js [output.js]")
-        print("示例: python deobfuscate_js.py app.ef123.js")
+        print(__doc__)
         sys.exit(1)
 
-    deobfuscate(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+    target = sys.argv[1]
+
+    if os.path.isdir(target):
+        deobfuscate_directory(target)
+    elif os.path.isfile(target):
+        output = sys.argv[2] if len(sys.argv) > 2 else None
+        deobfuscate_single(target, output)
+    else:
+        print(f"错误: 找不到 '{target}' (不是文件也不是目录)")
+        sys.exit(1)
